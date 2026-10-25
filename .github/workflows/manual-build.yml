@@ -1,0 +1,85 @@
+name: Manual Build APK
+# 手动触发：在 GitHub 仓库页 -> Actions -> Manual Build APK -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "构建类型 (release / debug)"
+        type: choice
+        default: release
+        options:
+          - release
+          - debug
+
+jobs:
+  build:
+    name: Build YuyanIme APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: gradle
+
+      - name: Prepare signing keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          RELEASE_STORE_FILE: ${{ secrets.RELEASE_STORE_FILE }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          mkdir -p keystore
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_FILE" ]; then
+            echo "使用仓库 secrets 中配置的正式 keystore"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RELEASE_STORE_FILE"
+            echo "store_file=$RELEASE_STORE_FILE" >> "$GITHUB_OUTPUT"
+            echo "store_pass=$RELEASE_STORE_PASSWORD" >> "$GITHUB_OUTPUT"
+            echo "key_alias=$RELEASE_KEY_ALIAS" >> "$GITHUB_OUTPUT"
+            echo "key_pass=$RELEASE_KEY_PASSWORD" >> "$GITHUB_OUTPUT"
+          else
+            echo "未配置签名 secrets，生成临时 keystore（可用于安装测试，不适合正式发布）"
+            keytool -genkeypair -v \
+              -keystore keystore/ci-release.keystore \
+              -alias cikey -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass yuyan_ci_2026 -keypass yuyan_ci_2026 \
+              -dname "CN=Yuyan CI, OU=CI, O=Yuyan, L=Beijing, ST=Beijing, C=CN"
+            echo "store_file=keystore/ci-release.keystore" >> "$GITHUB_OUTPUT"
+            echo "store_pass=yuyan_ci_2026" >> "$GITHUB_OUTPUT"
+            echo "key_alias=cikey" >> "$GITHUB_OUTPUT"
+            echo "key_pass=yuyan_ci_2026" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build APK
+        run: |
+          if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+            ./gradlew assembleOfflineDebug --stacktrace
+          else
+            ./gradlew assembleOffline --stacktrace
+          fi
+        env:
+          RELEASE_STORE_FILE: ${{ steps.keystore.outputs.store_file }}
+          RELEASE_STORE_PASSWORD: ${{ steps.keystore.outputs.store_pass }}
+          RELEASE_KEY_ALIAS: ${{ steps.keystore.outputs.key_alias }}
+          RELEASE_KEY_PASSWORD: ${{ steps.keystore.outputs.key_pass }}
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuyanIme-${{ github.event.inputs.build_type }}
+          path: app/build/outputs/apk/offline/**/*.apk
+          if-no-files-found: error
